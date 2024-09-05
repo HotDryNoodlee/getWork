@@ -19,7 +19,8 @@
 4. 从trapframe page中读取CPU核的编号到tp寄存器写入将CPU核的编号也就是hartid保存在tp寄存器。
 5. 从trapframe page中读取usertrap的指针到t0寄存器
 6. 从trapframe page中读取kernel page table的地址到t1寄存器
-7. 执行jr t0这条指令的作用是跳转到t0指向的函数中（usertrap）
+7. 切换为内核页表（t1 -> satp）
+8. 执行jr t0这条指令的作用是跳转到t0指向的函数中（usertrap）
 ### usertrap函数
 
 * usertrap某种程度上存储并恢复硬件状态，但是它也需要检查触发trap的原因，以确定相应的处理方式。
@@ -33,5 +34,26 @@
 6. 调用了一个函数usertrapret
 
 ### usertrapret函数
+1. 首先关闭了中断。我们之前在系统调用的过程中是打开了中断的，这里关闭中断是因为我们将要更新STVEC寄存器来指向用户空间的trap处理代码，而之前在内核中的时候，我们指向的是内核空间的trap处理代码（6.6）。我们关闭中断因为当我们将STVEC更新到指向用户空间的trap处理代码时，我们仍然在内核中执行代码。如果这时发生了一个中断，那么程序执行会走向用户空间的trap处理代码，即便我们现在仍然在内核中，出于各种各样具体细节的原因，这会导致内核出错。
+2. 设置了STVEC寄存器指向trampoline代码，在那里最终会执行sret指令返回到用户空间。
+3. 接下来的几行填入了trapframe的内容，这些内容对于执行trampoline代码非常有用。
+
+   * 存储了kernel page table的指针
+   * 存储了当前用户进程的kernel stack
+   * 存储了usertrap函数的指针，这样trampoline代码才能跳转到这个函数（注，详见6.5中 ld t0 (16)a0 指令）
+   * 从tp寄存器中读取当前的CPU核编号，并存储在trapframe中，这样trampoline代码才能恢复这个数字，因为用户代码可能会修改这个数字
+ 
+4. 将SEPC寄存器的值设置成之前保存的用户程序计数器的值。
+5. 我们根据user page table地址生成相应的SATP值，这样我们在返回到用户空间的时候才能完成page table的切换。
 
 ### userret函数
+1. 第一步是切换page table。执行csrw satp, a1
+2. 将a0寄存器指向的trapframe中，之前保存的寄存器的值加载到对应的各个寄存器中。
+3. 接下来，在我们即将返回到用户空间之前，我们交换SSCRATCH寄存器和a0寄存器的值。
+4. 执行sret、当我执行完这条指令：
+
+   * 程序会切换回user mode
+
+   * SEPC寄存器的数值会被拷贝到PC寄存器（程序计数器）
+
+   * 重新打开中断
